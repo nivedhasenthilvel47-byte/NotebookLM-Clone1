@@ -34,7 +34,7 @@ const PDFUpload = () => {
     formData.append('pdf', selectedFile);
   
     try {
-      const response = await fetch(`${process.env.BACKEND_URL || 'http://localhost:3001'}/api/upload`, {
+      const response = await fetch(`${process.env.REACT_APP_BACKEND_URL || 'http://localhost:3001'}/api/upload`, {
         method: 'POST',
         body: formData,
         // Do NOT set Content-Type here; browser sets it automatically

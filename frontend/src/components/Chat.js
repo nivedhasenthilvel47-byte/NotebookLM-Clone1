@@ -20,7 +20,8 @@ const Chat = () => {
   
   // Initialize socket connection
   useEffect(() => {
-    const newSocket = io(`${process.env.BACKEND_URL || 'http://localhost:3001'}`);
+    const backendUrl = process.env.REACT_APP_BACKEND_URL || 'http://localhost:3001';
+    const newSocket = io(backendUrl);
     setSocket(newSocket);
 
     newSocket.on('message', (message) => {
