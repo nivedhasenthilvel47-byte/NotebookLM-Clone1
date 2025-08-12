@@ -5,10 +5,53 @@ const multer = require('multer');
 const { Server } = require('socket.io');
 const fs = require('fs').promises;
 const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
+const http = require('http');
+const https = require('https');
 
 const app = express();
-const server = require('http').createServer(app);
-const io = new Server(server, {
+
+// Create both HTTP and HTTPS servers
+const httpServer = http.createServer(app);
+
+// For HTTPS, we'll need certificates
+// These should be stored securely and loaded from environment variables or a secure config
+// For development, you can generate self-signed certificates
+let httpsServer;
+try {
+  // Try to read certificates if they exist
+  const privateKey = fs.readFile(path.join(__dirname, 'certs', 'key.pem')).catch(() => null);
+  const certificate = fs.readFile(path.join(__dirname, 'certs', 'cert.pem')).catch(() => null);
+  
+  Promise.all([privateKey, certificate]).then(([key, cert]) => {
+    if (key && cert) {
+      const credentials = { key, cert };
+      httpsServer = https.createServer(credentials, app);
+      
+      // Start HTTPS server
+      const HTTPS_PORT = process.env.HTTPS_PORT || 3443;
+      httpsServer.listen(HTTPS_PORT, () => {
+        console.log(`HTTPS Server running on port ${HTTPS_PORT}`);
+      });
+      
+      // Set up Socket.IO for HTTPS
+      const httpsIo = new Server(httpsServer, {
+        cors: { origin: process.env.CLIENT_URL || 'http://localhost:3000', methods: ['GET', 'POST'] }
+      });
+      
+      // Configure Socket.IO for HTTPS (reuse the same handlers)
+      setupSocketHandlers(httpsIo);
+    } else {
+      console.log('HTTPS certificates not found. Running with HTTP only.');
+    }
+  }).catch(err => {
+    console.error('Error setting up HTTPS:', err);
+  });
+} catch (error) {
+  console.error('Failed to initialize HTTPS server:', error);
+}
+
+// Set up Socket.IO for HTTP
+const io = new Server(httpServer, {
   cors: { origin: process.env.CLIENT_URL || 'http://localhost:3000', methods: ['GET', 'POST'] }
 });
 
@@ -199,62 +242,67 @@ app.use((err, req, res, next) => {
   next();
 });
 
-// Socket.IO connection handling with optimized query handling
-io.on('connection', (socket) => {
-  console.log('Client connected');
+// Function to set up Socket.IO handlers for both HTTP and HTTPS servers
+function setupSocketHandlers(socketIo) {
+  socketIo.on('connection', (socket) => {
+    console.log('Client connected');
 
-  socket.on('message', async (data) => {
-    try {
-      const { text, pdfId } = data;
-      const store = pdfStores.get(pdfId);
+    socket.on('message', async (data) => {
+      try {
+        const { text, pdfId } = data;
+        const store = pdfStores.get(pdfId);
 
-      if (!store) {
+        if (!store) {
+          socket.emit('message', {
+            text: 'PDF not found. Please upload a PDF first.',
+            isUser: false
+          });
+          return;
+        }
+
+        // Optimize query processing (local TF-IDF retrieval)
+        const startTime = Date.now();
+        const qVec = textToVector(text, store.idf);
+        const sims = store.vectors.map((v, idx) => ({ idx, score: cosineSim(qVec, v) }));
+        sims.sort((a, b) => b.score - a.score);
+        const top = sims.slice(0, 3).filter(s => s.score > 0.01);
+
+        const citations = top.map((t) => ({ page: t.idx + 1 }));
+        const snippets = top.map((t) => {
+          const pageText = store.pages[t.idx] || '';
+          return `Page ${t.idx + 1}: ` + pageText.slice(0, 500) + (pageText.length > 500 ? '...' : '');
+        });
+
+        const responseText = snippets.length
+          ? `Here are the most relevant excerpts:\n\n${snippets.join('\n\n')}`
+          : 'I could not find relevant content. Try rephrasing your question.';
+
+        const queryTime = Date.now() - startTime;
+        console.log(`Query processed in ${queryTime}ms`);
+
         socket.emit('message', {
-          text: 'PDF not found. Please upload a PDF first.',
+          text: responseText,
+          isUser: false,
+          citations,
+          queryTime,
+        });
+      } catch (error) {
+        console.error('Error processing query:', error);
+        socket.emit('message', {
+          text: 'Error processing your request. Please try again.',
           isUser: false
         });
-        return;
       }
+    });
 
-      // Optimize query processing (local TF-IDF retrieval)
-      const startTime = Date.now();
-      const qVec = textToVector(text, store.idf);
-      const sims = store.vectors.map((v, idx) => ({ idx, score: cosineSim(qVec, v) }));
-      sims.sort((a, b) => b.score - a.score);
-      const top = sims.slice(0, 3).filter(s => s.score > 0.01);
-
-      const citations = top.map((t) => ({ page: t.idx + 1 }));
-      const snippets = top.map((t) => {
-        const pageText = store.pages[t.idx] || '';
-        return `Page ${t.idx + 1}: ` + pageText.slice(0, 500) + (pageText.length > 500 ? '...' : '');
-      });
-
-      const responseText = snippets.length
-        ? `Here are the most relevant excerpts:\n\n${snippets.join('\n\n')}`
-        : 'I could not find relevant content. Try rephrasing your question.';
-
-      const queryTime = Date.now() - startTime;
-      console.log(`Query processed in ${queryTime}ms`);
-
-      socket.emit('message', {
-        text: responseText,
-        isUser: false,
-        citations,
-        queryTime,
-      });
-    } catch (error) {
-      console.error('Error processing query:', error);
-      socket.emit('message', {
-        text: 'Error processing your request. Please try again.',
-        isUser: false
-      });
-    }
+    socket.on('disconnect', () => {
+      console.log('Client disconnected');
+    });
   });
+}
 
-  socket.on('disconnect', () => {
-    console.log('Client disconnected');
-  });
-});
+// Set up Socket.IO handlers for HTTP server
+setupSocketHandlers(io);
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
